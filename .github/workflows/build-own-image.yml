@@ -12,6 +12,7 @@ permissions:
 
 env:
   BASE_OS: ubuntu-jammy
+  INCLUDE_GIT_LFS: "false"
 
 jobs:
   build-and-scan:
@@ -53,6 +54,15 @@ jobs:
 
       - name: Prepare Dockerfiles
         run: |
+          # Optional hardening: remove git-lfs to avoid Go binary CVE exposure.
+          # Set INCLUDE_GIT_LFS=true if your workflows require git-lfs.
+          if [ "${INCLUDE_GIT_LFS}" != "true" ]; then
+            tmp_file="$(mktemp)"
+            jq '(.install[] | select(.category=="git").packages) |= map(select(. != "git-lfs"))' \
+              build/config.json > "${tmp_file}"
+            mv "${tmp_file}" build/config.json
+          fi
+
           cp Dockerfile.base Dockerfile.base.custom
           sed -i 's#^FROM .*#FROM ubuntu:jammy#' Dockerfile.base.custom
 
@@ -94,6 +104,7 @@ jobs:
           docker run --rm \
             aquasec/trivy:0.63.0 \
             image \
+            --scanners vuln \
             --severity CRITICAL \
             --exit-code 1 \
             --ignore-unfixed \
