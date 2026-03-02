@@ -1,0 +1,101 @@
+name: Build Private GitHub Runner Image
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 02:23 UTC
+    - cron: '23 2 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BASE_OS: ubuntu-jammy
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set image variables
+        run: |
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          SHA_SHORT="${GITHUB_SHA::7}"
+          DATE_TAG="$(date -u +%Y%m%d)"
+
+          echo "OWNER_LC=${OWNER_LC}" >> "${GITHUB_ENV}"
+          echo "SHA_SHORT=${SHA_SHORT}" >> "${GITHUB_ENV}"
+          echo "DATE_TAG=${DATE_TAG}" >> "${GITHUB_ENV}"
+          echo "UNIQUE_TAG=${BASE_OS}-${DATE_TAG}-${SHA_SHORT}" >> "${GITHUB_ENV}"
+
+          echo "BASE_IMAGE=ghcr.io/${OWNER_LC}/github-runner-base:${BASE_OS}" >> "${GITHUB_ENV}"
+          echo "BASE_IMAGE_UNIQUE=ghcr.io/${OWNER_LC}/github-runner-base:${BASE_OS}-${DATE_TAG}-${SHA_SHORT}" >> "${GITHUB_ENV}"
+          echo "FINAL_IMAGE=ghcr.io/${OWNER_LC}/github-runner:${BASE_OS}" >> "${GITHUB_ENV}"
+          echo "FINAL_IMAGE_UNIQUE=ghcr.io/${OWNER_LC}/github-runner:${BASE_OS}-${DATE_TAG}-${SHA_SHORT}" >> "${GITHUB_ENV}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          image: tonistiigi/binfmt:qemu-v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Dockerfiles
+        run: |
+          cp Dockerfile.base Dockerfile.base.custom
+          sed -i 's#^FROM .*#FROM ubuntu:jammy#' Dockerfile.base.custom
+
+          cp Dockerfile Dockerfile.custom
+          sed -i "s#^FROM .*#FROM ${BASE_IMAGE}#" Dockerfile.custom
+
+      - name: Build and push base image
+        run: |
+          docker buildx build \
+            --file Dockerfile.base.custom \
+            --platform linux/amd64,linux/arm64 \
+            --tag "${BASE_IMAGE}" \
+            --tag "${BASE_IMAGE_UNIQUE}" \
+            --push \
+            --pull \
+            --provenance=true \
+            --sbom=true \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+
+      - name: Build and push final image
+        run: |
+          docker buildx build \
+            --file Dockerfile.custom \
+            --platform linux/amd64,linux/arm64 \
+            --tag "${FINAL_IMAGE}" \
+            --tag "${FINAL_IMAGE_UNIQUE}" \
+            --push \
+            --pull \
+            --provenance=true \
+            --sbom=true \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+
+      - name: Scan final image for CRITICAL vulnerabilities
+        run: |
+          docker run --rm \
+            aquasec/trivy:0.63.0 \
+            image \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --timeout 10m \
+            "${FINAL_IMAGE_UNIQUE}"
